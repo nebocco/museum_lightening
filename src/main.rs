@@ -3,11 +3,14 @@ use bevy::{
     sprite::MaterialMesh2dBundle,
 };
 use geo::algorithm::triangulate_earcut::TriangulateEarcut;
-use geo::{ConvexHull, Intersects, Line, LineString, MultiPoint, Polygon};
+use geo::{ConvexHull, Intersects, Line, LineString, MultiPoint, MultiPolygon, Polygon};
+use geo_clipper::Clipper;
 
 const COLOR_NORMAL: Color = Color::ALICE_BLUE;
 const COLOR_SHADOW: Color = Color::GRAY;
-const COLOR_LIGHT: Color = Color::GOLD;
+const COLOR_SHADOW_UNION: Color = Color::SILVER;
+const COLOR_SHADOW_INTERSECTION: Color = Color::GRAY;
+const COLOR_LIGHT: Color = Color::FUCHSIA;
 const COLOR_OBSTACLE: Color = Color::DARK_GRAY;
 
 const WORLD_WIDTH: f32 = 960.0;
@@ -41,9 +44,9 @@ struct Obstacle;
 struct Shadow;
 
 #[derive(Component)]
-struct Theta(f32);
+struct Theta(f32, f32);
 
-const LIGHT_SIZE: f32 = 10.0;
+const LIGHT_SIZE: f32 = 8.0;
 
 fn setup(
     mut commands: Commands,
@@ -72,7 +75,18 @@ fn setup(
             ..default()
         },
         Light,
-        Theta(0.0),
+        Theta(0.0, 0.55),
+    ));
+
+    commands.spawn((
+        MaterialMesh2dBundle {
+            mesh: meshes.add(shape::Circle::new(LIGHT_SIZE).into()).into(),
+            material: materials.add(ColorMaterial::from(COLOR_LIGHT)),
+            transform: Transform::from_translation(Vec3::new(400., 0., 1.)),
+            ..default()
+        },
+        Light,
+        Theta(std::f32::consts::FRAC_PI_3, -0.35),
     ));
 
     // Quad
@@ -80,7 +94,7 @@ fn setup(
         SpriteBundle {
             sprite: Sprite {
                 color: COLOR_OBSTACLE,
-                custom_size: Some(Vec2::new(100.0, 100.0)),
+                custom_size: Some(Vec2::new(60.0, 100.0)),
                 ..default()
             },
             transform: Transform::from_translation(Vec3::new(0., -200., 1.))
@@ -93,7 +107,7 @@ fn setup(
         SpriteBundle {
             sprite: Sprite {
                 color: COLOR_OBSTACLE,
-                custom_size: Some(Vec2::new(30.0, 300.0)),
+                custom_size: Some(Vec2::new(10.0, 300.0)),
                 ..default()
             },
             transform: Transform::from_translation(Vec3::new(-50., 50., 1.))
@@ -102,12 +116,24 @@ fn setup(
         },
         Obstacle,
     ));
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                color: COLOR_OBSTACLE,
+                custom_size: Some(Vec2::new(20.0, 70.0)),
+                ..default()
+            },
+            transform: Transform::from_translation(Vec3::new(-350., -250., 1.))
+                .with_rotation(Quat::from_rotation_z(-45.0_f32.to_radians())),
+            ..default()
+        },
+        Obstacle,
+    ));
 }
 
 fn move_objects(mut moving_objects: Query<(&mut Theta, &mut Transform)>, time: Res<Time>) {
-    const D_THETA: f32 = 1.0;
     for (mut th, mut trans) in moving_objects.iter_mut() {
-        th.0 += D_THETA * time.delta_seconds();
+        th.0 += th.1 * time.delta_seconds();
         if th.0 >= std::f32::consts::TAU {
             th.0 -= std::f32::consts::TAU;
         }
@@ -127,29 +153,60 @@ fn update(
         commands.entity(entity).despawn();
     }
 
+    let mut shadow_polygons = Vec::new();
     for light in lights.iter() {
-        for obstacle in obstacles.iter() {
-            let shadow_polygon = calculate_shadow_polygon_from_obstacle(
-                light.translation.truncate(),
-                obstacle.1.custom_size.unwrap(),
-                obstacle.0,
-                (
-                    Vec2::new(-WORLD_WIDTH / 2., -WORLD_HEIGHT / 2.),
-                    Vec2::new(WORLD_WIDTH / 2., WORLD_HEIGHT / 2.),
-                ),
-            );
-            let (translation, mesh) = create_polygon_mesh(&shadow_polygon);
+        let shadow_polygon = obstacles
+            .iter()
+            .map(|obstacle| {
+                calculate_shadow_polygon_from_obstacle(
+                    light.translation.truncate(),
+                    obstacle.1.custom_size.unwrap(),
+                    obstacle.0,
+                    (
+                        Vec2::new(-WORLD_WIDTH / 2., -WORLD_HEIGHT / 2.),
+                        Vec2::new(WORLD_WIDTH / 2., WORLD_HEIGHT / 2.),
+                    ),
+                )
+            })
+            .fold(MultiPolygon::new(Vec::new()), |fold, polygon| {
+                fold.union(&MultiPolygon::new(vec![polygon]), 1e3)
+            });
 
-            commands.spawn((
-                MaterialMesh2dBundle {
-                    mesh: meshes.add(mesh).into(),
-                    material: materials.add(ColorMaterial::from(COLOR_SHADOW)),
-                    transform: Transform::from_translation(translation.extend(0.0)),
-                    ..Default::default()
-                },
-                Shadow,
-            ));
-        }
+        shadow_polygons.push(shadow_polygon);
+    }
+    let shadow_polygon_union = shadow_polygons
+        .iter()
+        .fold(MultiPolygon::new(Vec::new()), |fold, polygon| {
+            fold.union(polygon, 1e2)
+        });
+    let shadow_polygon_intersection = shadow_polygons
+        .into_iter()
+        .reduce(|fold, polygon| fold.intersection(&polygon, 1e2))
+        .unwrap();
+
+    for shadow in shadow_polygon_union.into_iter() {
+        let (translation, mesh) = create_polygon_mesh(&shadow);
+        commands.spawn((
+            MaterialMesh2dBundle {
+                mesh: meshes.add(mesh).into(),
+                material: materials.add(ColorMaterial::from(COLOR_SHADOW_UNION)),
+                transform: Transform::from_translation(translation.extend(0.0)),
+                ..Default::default()
+            },
+            Shadow,
+        ));
+    }
+    for shadow in shadow_polygon_intersection.into_iter() {
+        let (translation, mesh) = create_polygon_mesh(&shadow);
+        commands.spawn((
+            MaterialMesh2dBundle {
+                mesh: meshes.add(mesh).into(),
+                material: materials.add(ColorMaterial::from(COLOR_SHADOW_INTERSECTION)),
+                transform: Transform::from_translation(translation.extend(0.1)),
+                ..Default::default()
+            },
+            Shadow,
+        ));
     }
 }
 
