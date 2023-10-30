@@ -1,5 +1,8 @@
 use bevy::{
-    prelude::*, render::mesh::Indices, render::render_resource::PrimitiveTopology,
+    input::mouse::{MouseMotion, MouseWheel},
+    prelude::*,
+    render::mesh::Indices,
+    render::render_resource::PrimitiveTopology,
     sprite::MaterialMesh2dBundle,
 };
 use geo::algorithm::triangulate_earcut::TriangulateEarcut;
@@ -28,11 +31,18 @@ fn main() {
             ..Default::default()
         }))
         .insert_resource(ClearColor(COLOR_SHADOW))
+        .add_event::<MouseMotion>()
         .add_systems(Startup, setup)
         .add_systems(Update, bevy::window::close_on_esc)
-        .add_systems(Update, (update, move_objects))
+        .add_systems(
+            Update,
+            (update, move_objects, zoom_2d, zoom_reset, screen_dragging),
+        )
         .run();
 }
+
+#[derive(Component)]
+struct CameraLabel;
 
 #[derive(Component)]
 struct Light;
@@ -53,7 +63,9 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn(Camera2dBundle::default());
+    commands
+        .spawn(Camera2dBundle::default())
+        .insert(CameraLabel);
 
     // World
     commands.spawn((SpriteBundle {
@@ -351,4 +363,56 @@ fn create_polygon_mesh(polygon: &Polygon<f32>) -> (Vec2, Mesh) {
     mesh.set_indices(Some(Indices::U32(triangle_indices)));
 
     (translation, mesh)
+}
+
+fn zoom_2d(
+    mut scroll_evr: EventReader<MouseWheel>,
+    mut query: Query<&mut OrthographicProjection, With<CameraLabel>>,
+) {
+    if scroll_evr.is_empty() {
+        return;
+    }
+    let mut projection = query.single_mut();
+    for ev in scroll_evr.iter() {
+        if ev.y > 0.0 {
+            projection.scale *= 0.85;
+        } else {
+            projection.scale *= 1.15;
+        }
+    }
+    projection.scale = projection.scale.clamp(0.2, 3.0);
+}
+
+fn zoom_reset(
+    keys: Res<Input<KeyCode>>,
+    mut query: Query<&mut OrthographicProjection, With<CameraLabel>>,
+) {
+    if keys.just_pressed(KeyCode::Key0) {
+        let mut camera = query.single_mut();
+        camera.scale = 1.0;
+    }
+}
+
+fn screen_dragging(
+    keys: Res<Input<MouseButton>>,
+    mut motion_evr: EventReader<MouseMotion>,
+    mut query: Query<&mut Transform, With<CameraLabel>>,
+) {
+    // if !keys.pressed(MouseButton::Left) || motion_evr.is_empty() {
+    //     return;
+    // }
+    let mut camera = query.single_mut();
+    for ev in motion_evr.iter() {
+        println!("{:?}", ev);
+
+        // camera.translation += ev.delta.extend(0.0);
+    }
+    camera.translation.x = camera
+        .translation
+        .x
+        .clamp(-WORLD_WIDTH / 2., WORLD_WIDTH / 2.);
+    camera.translation.y = camera
+        .translation
+        .y
+        .clamp(-WORLD_HEIGHT / 2., WORLD_HEIGHT / 2.);
 }
