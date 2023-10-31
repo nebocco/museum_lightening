@@ -7,7 +7,9 @@ use bevy::{
 };
 use geo::algorithm::triangulate_earcut::TriangulateEarcut;
 use geo::{ConvexHull, Intersects, Line, LineString, MultiPoint, MultiPolygon, Polygon};
-use geo_clipper::Clipper;
+
+mod geo_scaled;
+use geo_scaled::ScaledBooleanOps;
 
 const COLOR_NORMAL: Color = Color::ALICE_BLUE;
 const COLOR_SHADOW: Color = Color::GRAY;
@@ -87,7 +89,7 @@ fn setup(
             ..default()
         },
         Light,
-        Theta(0.0, 0.55),
+        Theta(0.0, 0.40),
     ));
 
     commands.spawn((
@@ -181,7 +183,7 @@ fn update(
                 )
             })
             .fold(MultiPolygon::new(Vec::new()), |fold, polygon| {
-                fold.union(&MultiPolygon::new(vec![polygon]), 1e3)
+                fold.scaled_union(&MultiPolygon::new(vec![polygon]), 1e1)
             });
 
         shadow_polygons.push(shadow_polygon);
@@ -189,11 +191,11 @@ fn update(
     let shadow_polygon_union = shadow_polygons
         .iter()
         .fold(MultiPolygon::new(Vec::new()), |fold, polygon| {
-            fold.union(polygon, 1e2)
+            fold.scaled_union(polygon, 1e1)
         });
     let shadow_polygon_intersection = shadow_polygons
         .into_iter()
-        .reduce(|fold, polygon| fold.intersection(&polygon, 1e2))
+        .reduce(|fold, polygon| fold.scaled_intersection(&polygon, 1e1))
         .unwrap();
 
     for shadow in shadow_polygon_union.into_iter() {
