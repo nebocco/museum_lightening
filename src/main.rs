@@ -1,9 +1,12 @@
+#[cfg(target_arch = "wasm32")]
+use bevy::ecs as bevy_ecs;
 use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
     prelude::*,
     render::mesh::Indices,
     render::render_resource::PrimitiveTopology,
-    sprite::MaterialMesh2dBundle,
+    sprite::{collide_aabb, MaterialMesh2dBundle},
+    window::PrimaryWindow,
 };
 use geo::algorithm::triangulate_earcut::TriangulateEarcut;
 use geo::{ConvexHull, Intersects, Line, LineString, MultiPoint, MultiPolygon, Polygon};
@@ -21,6 +24,14 @@ const COLOR_OBSTACLE: Color = Color::DARK_GRAY;
 const WORLD_WIDTH: f32 = 960.0;
 const WORLD_HEIGHT: f32 = 720.0;
 
+const LIGHT_SIZE: f32 = 10.0;
+
+const LIGHT_Z: f32 = 3.0;
+const OBSTACLE_Z: f32 = 2.0;
+const DARK_SHADOW_Z: f32 = 1.0;
+const PALE_SHADOW_Z: f32 = 0.5;
+const BACKGROUND_Z: f32 = 0.0;
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -33,13 +44,14 @@ fn main() {
             ..Default::default()
         }))
         .insert_resource(ClearColor(COLOR_SHADOW))
+        .init_resource::<WorldCoords>()
         .add_event::<MouseMotion>()
         .add_systems(Startup, setup)
         .add_systems(Update, bevy::window::close_on_esc)
-        .add_systems(
-            Update,
-            (update, move_objects, zoom_2d, zoom_reset, screen_dragging),
-        )
+        .add_systems(Update, (grab_object, drag_object, drop_object))
+        .add_systems(Update, (zoom_2d, zoom_reset, screen_move))
+        .add_systems(Update, cursor_position_to_world_coordinate)
+        .add_systems(Update, update)
         .run();
 }
 
@@ -58,7 +70,14 @@ struct Shadow;
 #[derive(Component)]
 struct Theta(f32, f32);
 
-const LIGHT_SIZE: f32 = 8.0;
+#[derive(Component)]
+struct Draggable;
+
+#[derive(Component)]
+struct Dragging;
+
+#[derive(Resource, Default)]
+struct WorldCoords(Vec2);
 
 fn setup(
     mut commands: Commands,
@@ -76,31 +95,35 @@ fn setup(
             custom_size: Some(Vec2::new(WORLD_WIDTH, WORLD_HEIGHT)),
             ..default()
         },
-        transform: Transform::from_xyz(0.0, 0.0, -1.0),
+        transform: Transform::from_xyz(0.0, 0.0, BACKGROUND_Z),
         ..Default::default()
     },));
 
     // Circle
     commands.spawn((
         MaterialMesh2dBundle {
-            mesh: meshes.add(shape::Circle::new(LIGHT_SIZE).into()).into(),
+            mesh: meshes.add(shape::Circle::new(1.0).into()).into(),
             material: materials.add(ColorMaterial::from(COLOR_LIGHT)),
-            transform: Transform::from_translation(Vec3::new(400., 0., 1.)),
+            transform: Transform::from_translation(Vec3::new(400., 0., LIGHT_Z))
+                .with_scale(Vec3::new(LIGHT_SIZE, LIGHT_SIZE, 1.0)),
             ..default()
         },
         Light,
         Theta(0.0, 0.40),
+        Draggable,
     ));
 
     commands.spawn((
         MaterialMesh2dBundle {
-            mesh: meshes.add(shape::Circle::new(LIGHT_SIZE).into()).into(),
+            mesh: meshes.add(shape::Circle::new(1.0).into()).into(),
             material: materials.add(ColorMaterial::from(COLOR_LIGHT)),
-            transform: Transform::from_translation(Vec3::new(400., 0., 1.)),
+            transform: Transform::from_translation(Vec3::new(-400., 0., LIGHT_Z))
+                .with_scale(Vec3::new(LIGHT_SIZE, LIGHT_SIZE, 1.0)),
             ..default()
         },
         Light,
         Theta(std::f32::consts::FRAC_PI_3, -0.35),
+        Draggable,
     ));
 
     // Quad
@@ -108,10 +131,10 @@ fn setup(
         SpriteBundle {
             sprite: Sprite {
                 color: COLOR_OBSTACLE,
-                custom_size: Some(Vec2::new(60.0, 100.0)),
                 ..default()
             },
-            transform: Transform::from_translation(Vec3::new(0., -200., 1.))
+            transform: Transform::from_translation(Vec3::new(0., -200., OBSTACLE_Z))
+                .with_scale(Vec3::new(60.0, 100.0, 1.0))
                 .with_rotation(Quat::from_rotation_z(0.0_f32.to_radians())),
             ..default()
         },
@@ -121,10 +144,10 @@ fn setup(
         SpriteBundle {
             sprite: Sprite {
                 color: COLOR_OBSTACLE,
-                custom_size: Some(Vec2::new(10.0, 300.0)),
                 ..default()
             },
-            transform: Transform::from_translation(Vec3::new(-50., 50., 1.))
+            transform: Transform::from_translation(Vec3::new(-50., 50., OBSTACLE_Z))
+                .with_scale(Vec3::new(10.0, 300.0, 1.0))
                 .with_rotation(Quat::from_rotation_z(-60.0_f32.to_radians())),
             ..default()
         },
@@ -134,10 +157,10 @@ fn setup(
         SpriteBundle {
             sprite: Sprite {
                 color: COLOR_OBSTACLE,
-                custom_size: Some(Vec2::new(20.0, 70.0)),
                 ..default()
             },
-            transform: Transform::from_translation(Vec3::new(-350., -250., 1.))
+            transform: Transform::from_translation(Vec3::new(-350., -250., OBSTACLE_Z))
+                .with_scale(Vec3::new(20.0, 70.0, 1.0))
                 .with_rotation(Quat::from_rotation_z(-45.0_f32.to_radians())),
             ..default()
         },
@@ -145,13 +168,70 @@ fn setup(
     ));
 }
 
-fn move_objects(mut moving_objects: Query<(&mut Theta, &mut Transform)>, time: Res<Time>) {
-    for (mut th, mut trans) in moving_objects.iter_mut() {
-        th.0 += th.1 * time.delta_seconds();
-        if th.0 >= std::f32::consts::TAU {
-            th.0 -= std::f32::consts::TAU;
+fn grab_object(
+    mut commands: Commands,
+    draggable: Query<(Entity, &Transform), With<Draggable>>,
+    dragging: Query<&Dragging>,
+    mouse_button: Res<Input<MouseButton>>,
+    cursor_position: Res<WorldCoords>,
+) {
+    if dragging.get_single().is_ok() || !mouse_button.just_pressed(MouseButton::Left) {
+        return;
+    }
+    for (e, transform) in draggable.iter() {
+        if collide_aabb::collide(
+            cursor_position.0.extend(0.0),
+            [0.0, 0.0].into(),
+            transform.translation,
+            transform.scale.truncate(),
+        )
+        .is_some()
+        {
+            commands.entity(e).insert(Dragging);
+            return;
         }
-        trans.translation = Vec3::new(400.0 * th.0.cos(), 300.0 * th.0.sin(), 1.0);
+    }
+}
+
+fn drag_object(
+    mut object: Query<&mut Transform, With<Dragging>>,
+    mouse_button: Res<Input<MouseButton>>,
+    cursor_position: Res<WorldCoords>,
+) {
+    if !mouse_button.pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok(mut transform) = object.get_single_mut() else {
+        return;
+    };
+    transform.translation = cursor_position.0.extend(transform.translation.z);
+}
+
+fn drop_object(
+    mut commands: Commands,
+    object: Query<Entity, With<Dragging>>,
+    mouse_button: Res<Input<MouseButton>>,
+) {
+    if mouse_button.just_released(MouseButton::Left) {
+        if let Ok(e) = object.get_single() {
+            commands.entity(e).remove::<Dragging>();
+        }
+    }
+}
+
+fn cursor_position_to_world_coordinate(
+    mut mycoords: ResMut<WorldCoords>,
+    q_window: Query<&Window, With<PrimaryWindow>>,
+    q_camera: Query<(&Camera, &GlobalTransform), With<CameraLabel>>,
+) {
+    let (camera, camera_transform) = q_camera.single();
+    let window = q_window.single();
+    if let Some(world_position) = window
+        .cursor_position()
+        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
+        .map(|ray| ray.origin.truncate())
+    {
+        mycoords.0 = world_position;
     }
 }
 
@@ -159,7 +239,7 @@ fn update(
     mut commands: Commands,
     shadows: Query<Entity, With<Shadow>>,
     lights: Query<&Transform, With<Light>>,
-    obstacles: Query<(&Transform, &Sprite), With<Obstacle>>,
+    obstacles: Query<&Transform, With<Obstacle>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
@@ -174,8 +254,7 @@ fn update(
             .map(|obstacle| {
                 calculate_shadow_polygon_from_obstacle(
                     light.translation.truncate(),
-                    obstacle.1.custom_size.unwrap(),
-                    obstacle.0,
+                    obstacle,
                     (
                         Vec2::new(-WORLD_WIDTH / 2., -WORLD_HEIGHT / 2.),
                         Vec2::new(WORLD_WIDTH / 2., WORLD_HEIGHT / 2.),
@@ -204,7 +283,7 @@ fn update(
             MaterialMesh2dBundle {
                 mesh: meshes.add(mesh).into(),
                 material: materials.add(ColorMaterial::from(COLOR_SHADOW_UNION)),
-                transform: Transform::from_translation(translation.extend(0.0)),
+                transform: Transform::from_translation(translation.extend(PALE_SHADOW_Z)),
                 ..Default::default()
             },
             Shadow,
@@ -216,7 +295,7 @@ fn update(
             MaterialMesh2dBundle {
                 mesh: meshes.add(mesh).into(),
                 material: materials.add(ColorMaterial::from(COLOR_SHADOW_INTERSECTION)),
-                transform: Transform::from_translation(translation.extend(0.1)),
+                transform: Transform::from_translation(translation.extend(DARK_SHADOW_Z)),
                 ..Default::default()
             },
             Shadow,
@@ -224,9 +303,9 @@ fn update(
     }
 }
 
-fn calculate_vertices(size: Vec2, transform: &Transform) -> [Vec2; 4] {
-    let rotation =
-        Vec2::from_angle(transform.rotation.to_euler(EulerRot::YXZ).2) * transform.scale.truncate();
+fn calculate_vertices(transform: &Transform) -> [Vec2; 4] {
+    let rotation = Vec2::from_angle(transform.rotation.to_euler(EulerRot::YXZ).2);
+    let size = transform.scale;
     let translation = transform.translation.truncate();
     let res = [
         rotation.rotate(Vec2::new(-size.x / 2., -size.y / 2.)) + translation,
@@ -275,7 +354,6 @@ fn calculate_intersection_to_world_bondary(
 
 fn calculate_shadow_polygon_from_obstacle(
     light_position: Vec2,
-    obstacle_size: Vec2,
     obstacle_transform: &Transform,
     world_boundary: (Vec2, Vec2),
 ) -> Polygon<f32> {
@@ -286,7 +364,7 @@ fn calculate_shadow_polygon_from_obstacle(
         Vec2::new(WORLD_WIDTH / 2., -WORLD_HEIGHT / 2.),
     ];
 
-    let obstacle_vertices = calculate_vertices(obstacle_size, obstacle_transform);
+    let obstacle_vertices = calculate_vertices(obstacle_transform);
     let obstacle_polygon = Polygon::<f32>::new(
         LineString::from_iter(obstacle_vertices.iter().map(|v| v.to_array())),
         Vec::new(),
@@ -387,28 +465,38 @@ fn zoom_2d(
 
 fn zoom_reset(
     keys: Res<Input<KeyCode>>,
-    mut query: Query<&mut OrthographicProjection, With<CameraLabel>>,
+    mut query: Query<(&mut OrthographicProjection, &mut Transform), With<CameraLabel>>,
 ) {
     if keys.just_pressed(KeyCode::Key0) {
-        let mut camera = query.single_mut();
-        camera.scale = 1.0;
+        let (mut projection, mut trasnsform) = query.single_mut();
+        projection.scale = 1.0;
+        trasnsform.translation.x = 0.0;
+        trasnsform.translation.y = 0.0;
     }
 }
 
-fn screen_dragging(
-    keys: Res<Input<MouseButton>>,
-    mut motion_evr: EventReader<MouseMotion>,
+fn screen_move(
+    keys: Res<Input<KeyCode>>,
+    time: Res<Time>,
+
     mut query: Query<&mut Transform, With<CameraLabel>>,
 ) {
-    // if !keys.pressed(MouseButton::Left) || motion_evr.is_empty() {
-    //     return;
-    // }
-    let mut camera = query.single_mut();
-    for ev in motion_evr.iter() {
-        println!("{:?}", ev);
+    const SPEED: f32 = WORLD_WIDTH / 2.0;
 
-        // camera.translation += ev.delta.extend(0.0);
+    let mut camera = query.single_mut();
+    if keys.pressed(KeyCode::Right) {
+        camera.translation.x += SPEED * time.delta_seconds();
     }
+    if keys.pressed(KeyCode::Left) {
+        camera.translation.x -= SPEED * time.delta_seconds();
+    }
+    if keys.pressed(KeyCode::Up) {
+        camera.translation.y += SPEED * time.delta_seconds();
+    }
+    if keys.pressed(KeyCode::Down) {
+        camera.translation.y -= SPEED * time.delta_seconds();
+    }
+
     camera.translation.x = camera
         .translation
         .x
