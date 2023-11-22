@@ -44,12 +44,21 @@ fn main() {
             ..Default::default()
         }))
         .insert_resource(ClearColor(COLOR_SHADOW))
+        .insert_resource(WorldScale(1.0))
         .init_resource::<WorldCoords>()
         .add_event::<MouseMotion>()
         .add_systems(Startup, setup)
         .add_systems(Update, bevy::window::close_on_esc)
         .add_systems(Update, (grab_object, drag_object, drop_object))
-        .add_systems(Update, (zoom_2d, zoom_reset, screen_move))
+        .add_systems(
+            Update,
+            (
+                change_camera_scale,
+                scale_world_with_scroll,
+                zoom_reset,
+                screen_move,
+            ),
+        )
         .add_systems(Update, cursor_position_to_world_coordinate)
         .add_systems(Update, update)
         .run();
@@ -79,6 +88,9 @@ struct Dragging;
 #[derive(Resource, Default)]
 struct WorldCoords(Vec2);
 
+#[derive(Resource)]
+struct WorldScale(f32);
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -104,7 +116,7 @@ fn setup(
         MaterialMesh2dBundle {
             mesh: meshes.add(shape::Circle::new(1.0).into()).into(),
             material: materials.add(ColorMaterial::from(COLOR_LIGHT)),
-            transform: Transform::from_translation(Vec3::new(400., 0., LIGHT_Z))
+            transform: Transform::from_translation(Vec3::new(400.0, 0.0, LIGHT_Z))
                 .with_scale(Vec3::new(LIGHT_SIZE, LIGHT_SIZE, 1.0)),
             ..default()
         },
@@ -117,7 +129,7 @@ fn setup(
         MaterialMesh2dBundle {
             mesh: meshes.add(shape::Circle::new(1.0).into()).into(),
             material: materials.add(ColorMaterial::from(COLOR_LIGHT)),
-            transform: Transform::from_translation(Vec3::new(-400., 0., LIGHT_Z))
+            transform: Transform::from_translation(Vec3::new(-400.0, 0.0, LIGHT_Z))
                 .with_scale(Vec3::new(LIGHT_SIZE, LIGHT_SIZE, 1.0)),
             ..default()
         },
@@ -133,7 +145,7 @@ fn setup(
                 color: COLOR_OBSTACLE,
                 ..default()
             },
-            transform: Transform::from_translation(Vec3::new(0., -200., OBSTACLE_Z))
+            transform: Transform::from_translation(Vec3::new(0.0, -200.0, OBSTACLE_Z))
                 .with_scale(Vec3::new(60.0, 100.0, 1.0))
                 .with_rotation(Quat::from_rotation_z(0.0_f32.to_radians())),
             ..default()
@@ -146,7 +158,7 @@ fn setup(
                 color: COLOR_OBSTACLE,
                 ..default()
             },
-            transform: Transform::from_translation(Vec3::new(-50., 50., OBSTACLE_Z))
+            transform: Transform::from_translation(Vec3::new(-50.0, 50.0, OBSTACLE_Z))
                 .with_scale(Vec3::new(10.0, 300.0, 1.0))
                 .with_rotation(Quat::from_rotation_z(-60.0_f32.to_radians())),
             ..default()
@@ -159,7 +171,7 @@ fn setup(
                 color: COLOR_OBSTACLE,
                 ..default()
             },
-            transform: Transform::from_translation(Vec3::new(-350., -250., OBSTACLE_Z))
+            transform: Transform::from_translation(Vec3::new(-350.0, -250.0, OBSTACLE_Z))
                 .with_scale(Vec3::new(20.0, 70.0, 1.0))
                 .with_rotation(Quat::from_rotation_z(-45.0_f32.to_radians())),
             ..default()
@@ -183,7 +195,7 @@ fn grab_object(
             cursor_position.0.extend(0.0),
             [0.0, 0.0].into(),
             transform.translation,
-            transform.scale.truncate(),
+            transform.scale.truncate() * 2.0,
         )
         .is_some()
         {
@@ -445,33 +457,43 @@ fn create_polygon_mesh(polygon: &Polygon<f32>) -> (Vec2, Mesh) {
     (translation, mesh)
 }
 
-fn zoom_2d(
+fn scale_world_with_scroll(
     mut scroll_evr: EventReader<MouseWheel>,
-    mut query: Query<&mut OrthographicProjection, With<CameraLabel>>,
+    mut world_scale: ResMut<WorldScale>,
 ) {
     if scroll_evr.is_empty() {
         return;
     }
-    let mut projection = query.single_mut();
     for ev in scroll_evr.iter() {
         if ev.y > 0.0 {
-            projection.scale *= 0.85;
-        } else {
-            projection.scale *= 1.15;
+            world_scale.0 *= 0.85;
+        } else if ev.y < 0.0 {
+            world_scale.0 *= 1.15;
         }
     }
-    projection.scale = projection.scale.clamp(0.2, 3.0);
+    world_scale.0 = world_scale.0.clamp(0.2, 3.0);
 }
 
 fn zoom_reset(
     keys: Res<Input<KeyCode>>,
-    mut query: Query<(&mut OrthographicProjection, &mut Transform), With<CameraLabel>>,
+    mut world_scale: ResMut<WorldScale>,
+    mut query: Query<&mut Transform, With<CameraLabel>>,
 ) {
     if keys.just_pressed(KeyCode::Key0) {
-        let (mut projection, mut trasnsform) = query.single_mut();
-        projection.scale = 1.0;
-        trasnsform.translation.x = 0.0;
-        trasnsform.translation.y = 0.0;
+        let mut transform = query.single_mut();
+        transform.translation.x = 0.0;
+        transform.translation.y = 0.0;
+        world_scale.0 = 1.0;
+    }
+}
+
+fn change_camera_scale(
+    world_scale: Res<WorldScale>,
+    mut query: Query<&mut OrthographicProjection, With<CameraLabel>>,
+) {
+    if world_scale.is_changed() {
+        let mut camera = query.single_mut();
+        camera.scale = world_scale.0;
     }
 }
 
