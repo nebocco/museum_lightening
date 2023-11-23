@@ -1,4 +1,4 @@
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 use bevy::ecs as bevy_ecs;
 use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
@@ -19,6 +19,7 @@ const COLOR_SHADOW: Color = Color::GRAY;
 const COLOR_SHADOW_UNION: Color = Color::SILVER;
 const COLOR_SHADOW_INTERSECTION: Color = Color::GRAY;
 const COLOR_LIGHT: Color = Color::FUCHSIA;
+const COLOR_LIGHT_SELECTED: Color = Color::MIDNIGHT_BLUE;
 const COLOR_OBSTACLE: Color = Color::DARK_GRAY;
 
 const WORLD_WIDTH: f32 = 960.0;
@@ -49,7 +50,11 @@ fn main() {
         .add_event::<MouseMotion>()
         .add_systems(Startup, setup)
         .add_systems(Update, bevy::window::close_on_esc)
-        .add_systems(Update, (grab_object, drag_object, drop_object))
+        .add_systems(Update, (spawn_light, despawn_selected_light))
+        .add_systems(
+            Update,
+            (grab_object, drag_object, drop_object, unselect_object),
+        )
         .add_systems(
             Update,
             (
@@ -84,6 +89,9 @@ struct Draggable;
 
 #[derive(Component)]
 struct Dragging;
+
+#[derive(Component)]
+struct Selected;
 
 #[derive(Resource, Default)]
 struct WorldCoords(Vec2);
@@ -180,8 +188,73 @@ fn setup(
     ));
 }
 
+fn spawn_light(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mouse_button: Res<Input<MouseButton>>,
+    cursor_position: Res<WorldCoords>,
+) {
+    if mouse_button.just_pressed(MouseButton::Right) {
+        commands.spawn((
+            MaterialMesh2dBundle {
+                mesh: meshes.add(shape::Circle::new(1.0).into()).into(),
+                material: materials.add(ColorMaterial::from(COLOR_LIGHT)),
+                transform: Transform::from_translation(cursor_position.0.extend(LIGHT_Z))
+                    .with_scale(Vec3::new(LIGHT_SIZE, LIGHT_SIZE, 1.0)),
+                ..default()
+            },
+            Light,
+            Draggable,
+        ));
+    }
+}
+
+fn despawn_selected_light(
+    mut commands: Commands,
+    query: Query<Entity, With<Selected>>,
+    keys: Res<Input<KeyCode>>,
+) {
+    if keys.just_pressed(KeyCode::Delete) {
+        for e in query.iter() {
+            commands.entity(e).despawn_recursive();
+        }
+    }
+}
+
+fn unselect_object(
+    mut commands: Commands,
+    query: Query<(Entity, &Transform), With<Selected>>,
+    mouse_button: Res<Input<MouseButton>>,
+    cursor_position: Res<WorldCoords>,
+) {
+    if !mouse_button.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok((e, transform)) = query.get_single() else {
+        return;
+    };
+    if collide_aabb::collide(
+        cursor_position.0.extend(0.0),
+        [0.0, 0.0].into(),
+        transform.translation,
+        transform.scale.truncate() * 2.0,
+    )
+    .is_none()
+    {
+        commands
+            .entity(e)
+            .despawn_descendants()
+            .clear_children()
+            .remove::<Selected>();
+        return;
+    }
+}
+
 fn grab_object(
     mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     draggable: Query<(Entity, &Transform), With<Draggable>>,
     dragging: Query<&Dragging>,
     mouse_button: Res<Input<MouseButton>>,
@@ -199,7 +272,19 @@ fn grab_object(
         )
         .is_some()
         {
-            commands.entity(e).insert(Dragging);
+            let child = commands
+                .spawn((MaterialMesh2dBundle {
+                    mesh: meshes.add(shape::Circle::new(1.0).into()).into(),
+                    material: materials.add(ColorMaterial::from(COLOR_LIGHT_SELECTED)),
+                    transform: Transform::from_scale(Vec3::new(1.3, 1.3, 1.0))
+                        .with_translation(Vec3::new(0.0, 0.0, -0.1)),
+                    ..Default::default()
+                },))
+                .id();
+            commands
+                .entity(e)
+                .insert((Dragging, Selected))
+                .add_child(child);
             return;
         }
     }
@@ -284,11 +369,6 @@ fn update(
         .fold(MultiPolygon::new(Vec::new()), |fold, polygon| {
             fold.scaled_union(polygon, 1e1)
         });
-    let shadow_polygon_intersection = shadow_polygons
-        .into_iter()
-        .reduce(|fold, polygon| fold.scaled_intersection(&polygon, 1e1))
-        .unwrap();
-
     for shadow in shadow_polygon_union.into_iter() {
         let (translation, mesh) = create_polygon_mesh(&shadow);
         commands.spawn((
@@ -301,17 +381,22 @@ fn update(
             Shadow,
         ));
     }
-    for shadow in shadow_polygon_intersection.into_iter() {
-        let (translation, mesh) = create_polygon_mesh(&shadow);
-        commands.spawn((
-            MaterialMesh2dBundle {
-                mesh: meshes.add(mesh).into(),
-                material: materials.add(ColorMaterial::from(COLOR_SHADOW_INTERSECTION)),
-                transform: Transform::from_translation(translation.extend(DARK_SHADOW_Z)),
-                ..Default::default()
-            },
-            Shadow,
-        ));
+    if let Some(shadow_polygon_intersection) = shadow_polygons
+        .into_iter()
+        .reduce(|fold, polygon| fold.scaled_intersection(&polygon, 1e1))
+    {
+        for shadow in shadow_polygon_intersection.into_iter() {
+            let (translation, mesh) = create_polygon_mesh(&shadow);
+            commands.spawn((
+                MaterialMesh2dBundle {
+                    mesh: meshes.add(mesh).into(),
+                    material: materials.add(ColorMaterial::from(COLOR_SHADOW_INTERSECTION)),
+                    transform: Transform::from_translation(translation.extend(DARK_SHADOW_Z)),
+                    ..Default::default()
+                },
+                Shadow,
+            ));
+        }
     }
 }
 
